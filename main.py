@@ -80,6 +80,7 @@ last_flap = pygame.time.get_ticks()
 
 animate_flap = True
 flap_animation_time = 0.08 * 1000
+f_u = flap_animation_time
 last_flap_animation = pygame.time.get_ticks()
 
 u = 0
@@ -95,7 +96,8 @@ flipped_rect_image = pygame.transform.flip(rect_image, flip_x=False, flip_y=True
 rectangle_width_half = rect_image.get_rect().w / 2
 spawn_width_offset = 500  # pixels
 spawn_location_x = screen_width + spawn_width_offset
-spawn_time = 3 * 1000
+spawn_time_normal = 3 * 1000
+spawn_time = spawn_time_normal
 rectangle_queue = deque(maxlen=20)
 last_rect_spawn = pygame.time.get_ticks()
 rectangle_cut_off_top = 100
@@ -104,12 +106,53 @@ rectangle_speed = ground_scroll_speed
 r_u = rectangle_speed
 rect_id = 0
 
+# Power Ups
+collide = True
+powerups_spawned = deque(maxlen=20)
+powerup_width = 64
+powerup_height = 64
+powerup_image = pygame.Surface((powerup_width, powerup_height))
+
+
+# Headstart
+HEAD_START_EVENT = False
+head_start_last_trigger = pygame.time.get_ticks()
+head_start_time = 5 * 1000
+rect_spawn_time_headstart = 0.5 * 1000
+head_starts_count = 0
+head_start_id = 1
+
+# Pew pew start event
+PEW_PEW_START_EVENT = False
+gun_last_trigger = pygame.time.get_ticks()
+gun_time = 20 * 1000
+rect_spawn_time_gun = 0.75 * 1000
+
+bullet_surf = pygame.Surface((10, 10))
+bullet_speed = 2
+bullet_cooldown = 0.5 * 1000
+last_bullet_fired = pygame.time.get_ticks()
+fire_bullet = False
+bullet_queue = deque(maxlen=20)
+
+pipes_to_fall = []
+pew_pew_count = 0
+pew_pew_id = 2
+
+# Feather Ending
+FEATHER_EVENT_START = False
+feather_last_trigger = pygame.time.get_ticks()
+feather_cooldown = 0.1 * 1000
+feather_bump = 1
+feather_count = 0
+feather_id = 3
+
 
 def draw_background():
     blits = []
     pos = background_pos.copy()
     while pos.x <= screen_width + 100:
-        background_rect = background_image.get_rect(bottomleft=(pos.x, pos.y))
+        background_rect = background_image.get_rect(bottomleft=pos)
         pos.x += background_rect.width
         blits.append((background_image, background_rect))
     screen.blits(blits)
@@ -118,11 +161,24 @@ def draw_background():
 def draw_and_get_pipes():
     rects = []
     blits = []
-    for _, (top, bottom) in rectangle_queue:
-        top_rect = rect_image.get_rect(midbottom=(top.x, top.y))
-        bottom_rect = flipped_rect_image.get_rect(midtop=(bottom.x, bottom.y))
+    rect_ids = []
+    for rect_id, (top, bottom) in rectangle_queue:
+        top_rect = rect_image.get_rect(midbottom=top)
+        bottom_rect = flipped_rect_image.get_rect(midtop=bottom)
         blits.extend([(rect_image, top_rect), (flipped_rect_image, bottom_rect)])
         rects.extend([top_rect, bottom_rect])
+        rect_ids.extend([(rect_id, 0), (rect_id, 1)])
+    screen.blits(blits)
+    return rect_ids, rects
+
+
+def draw_and_get_bullets():
+    rects = []
+    blits = []
+    for bullet_pos in bullet_queue:
+        bullet_rect = bullet_surf.get_rect(center=bullet_pos)
+        rects.append(bullet_rect)
+        blits.append((bullet_surf, bullet_rect))
     screen.blits(blits)
     return rects
 
@@ -132,7 +188,7 @@ def draw_and_get_ground():
     blits = []
     pos = ground_pos.copy()
     while pos.x <= screen_width + 100:
-        ground_rect = ground_image.get_rect(topleft=(pos.x, pos.y))
+        ground_rect = ground_image.get_rect(topleft=pos)
         pos.x += ground_rect.width
         blits.append((ground_image, ground_rect))
         rects.append(ground_rect)
@@ -142,10 +198,23 @@ def draw_and_get_ground():
 
 def draw_and_get_bird():
     bird_image = bird_states[bird_state]
-    bird_rect = bird_image.get_rect(center=(player_pos.x, player_pos.y))
+    bird_rect = bird_image.get_rect(center=player_pos)
     bird_image = pygame.transform.scale_by(bird_image, 1.2)
     screen.blit(bird_image, bird_rect)
     return bird_rect
+
+
+def draw_and_get_powerups():
+    blits = []
+    rects = []
+    powerup_ids = []
+    for powerup_id, powerup_pos in powerups_spawned:
+        powerup_rect = powerup_image.get_rect(center=powerup_pos)
+        powerup_ids.append(powerup_id)
+        blits.append((powerup_image, powerup_rect))
+        rects.append(powerup_rect)
+    screen.blits(blits)
+    return powerup_ids, rects
 
 
 def update_score():
@@ -157,19 +226,6 @@ def update_score():
             score = rect_id
 
 
-def draw_rectangles_return_collides(rects: list[dict]):
-    collides = []
-    for kwargs in rects:
-        collide = True
-        if "collide" in kwargs:
-            collide = False
-            del kwargs["collide"]
-        pygame.draw.rect(**kwargs)  # can parallelize maybe
-        if collide:
-            collides.append(kwargs.get("rect"))
-    return collides
-
-
 def game_start_action(start_event_triggered):
     if not start_event_triggered:
         pygame.time.set_timer(GAMESTART_EVENT, start_delay_ms, 1)
@@ -178,22 +234,48 @@ def game_start_action(start_event_triggered):
         return True, True
 
 
+def reset_rectangles(game_end: bool):
+    global_vars = globals()
+    global_vars["rectangle_queue"].clear()
+    global_vars["rect_id"] = 0 if game_end else global_vars["score"]
+
+
+def bird_reset(modify_pos: bool = True):
+    global_vars = globals()
+    if modify_pos:
+        global_vars["player_pos"] = pygame.Vector2(screen_width / 2, screen_height / 2)
+    global_vars["f_u"] = flap_animation_time
+    global_vars["bird_acc"] = a
+    global_vars["bird_state"] = 1
+    global_vars["animate_flap"] = True
+
+
+def powerup_reset(modify_bird_pos: bool = True):
+    global_vars = globals()
+    global_vars["spawn_time"] = spawn_time_normal
+    global_vars["r_u"] = min(r_u, rectangle_speed)
+    global_vars["g_u"] = min(r_u, ground_scroll_speed)
+    global_vars["rect_id"] = global_vars["score"]
+    bird_reset(modify_bird_pos)
+
+
 def reset_game():
     global_vars = globals()
     global_vars["BIRD_DIE_EVENT"] = False
     global_vars["start_event_triggered"] = False
     global_vars["game_start"] = False
-    global_vars["player_pos"] = pygame.Vector2(screen_width / 2, screen_height / 2)
-    global_vars["rectangle_queue"].clear()
-    global_vars["rect_id"] = 0
     global_vars["score"] = 0
     global_vars["u"] = 0
     global_vars["r_u"] = rectangle_speed
-    global_vars["bird_acc"] = a
-    global_vars["bird_state"] = 1
-    global_vars["animate_flap"] = True
     global_vars["g_u"] = ground_scroll_speed
     global_vars["bg_u"] = background_scroll_speed
+    global_vars["bullet_queue"].clear()
+    global_vars["HEAD_START_EVENT"] = False
+    global_vars["PEW_PEW_START_EVENT"] = False
+    global_vars["pipes_to_fall"].clear()
+    global_vars["powerups_spawned"].clear()
+    reset_rectangles(True)
+    bird_reset()
 
 
 running = True
@@ -218,6 +300,32 @@ while running:
                         start_event_triggered
                     )
                     animate_flap = True
+            if (
+                event.key == pygame.K_q
+                and head_starts_count > 0
+                and game_start
+                and not BIRD_DIE_EVENT
+            ):
+                head_starts_count -= 1
+                HEAD_START_EVENT = True
+                head_start_last_trigger = pygame.time.get_ticks()
+            if (
+                event.key == pygame.K_w
+                and pew_pew_count > 0
+                and game_start
+                and not BIRD_DIE_EVENT
+            ):
+                pew_pew_count -= 1
+                PEW_PEW_START_EVENT = True
+                gun_last_trigger = pygame.time.get_ticks()
+            if event.key == pygame.K_e and game_start and not BIRD_DIE_EVENT:
+                if feather_count > 0 and feather_count < 10:
+                    feather_count -= 1
+                    FEATHER_EVENT_START = True
+                    feather_last_trigger = pygame.time.get_ticks()
+                elif feather_count == 10:
+                    feather_count = 0
+                    SECRET_ENDING_EVENT = True
         if event.type == pygame.MOUSEBUTTONDOWN:
             if event.button in [pygame.BUTTON_LEFT, pygame.BUTTON_RIGHT]:
                 if BIRD_DIE_EVENT:
@@ -231,16 +339,75 @@ while running:
     # Calculate bird motion
     g = gravity if game_start else 0
 
+    # Head start
+    if HEAD_START_EVENT:
+        if pygame.time.get_ticks() - head_start_last_trigger <= head_start_time:
+            dt = dt * 2
+            g = 0
+            flap = False
+            player_pos = pygame.Vector2(screen_width / 2, screen_height / 2)
+            collide = False
+            spawn_time = rect_spawn_time_headstart
+            r_u = rectangle_speed * 3
+            g_u = ground_scroll_speed * 2
+            f_u = flap_animation_time / 2
+            if (
+                pygame.time.get_ticks() - head_start_last_trigger
+                > head_start_time - 500
+            ):
+                if (
+                    len(rectangle_queue) > 0
+                    and rectangle_queue[-1][1][1].x >= player_pos.x
+                ):
+                    rectangle_queue.pop()
+        else:
+            HEAD_START_EVENT = False
+            collide = True
+            powerup_reset()
+
+    # Pew pew
+    if PEW_PEW_START_EVENT:
+        if pygame.time.get_ticks() - gun_last_trigger <= gun_time:
+            player_pos = pygame.Vector2(100, player_pos.y)
+            spawn_time = rect_spawn_time_gun
+            r_u = rectangle_speed * 3
+            g_u = ground_scroll_speed * 2
+            f_u = flap_animation_time / 2
+            if pygame.time.get_ticks() - gun_last_trigger <= 100:
+                reset_rectangles(False)
+            if pygame.time.get_ticks() - last_bullet_fired <= bullet_cooldown:
+                fire_bullet = False
+            else:
+                fire_bullet = True
+                last_bullet_fired = pygame.time.get_ticks()
+            if pygame.time.get_ticks() - gun_last_trigger > gun_time - 500:
+                if (
+                    len(rectangle_queue) > 0
+                    and rectangle_queue[-1][1][1].x >= player_pos.x
+                ):
+                    rectangle_queue.pop()
+        else:
+            PEW_PEW_START_EVENT = False
+            pipes_to_fall.clear()
+            powerup_reset(modify_bird_pos=False)
+            player_pos = pygame.Vector2(screen_width / 2, player_pos.y)
+
+    if FEATHER_EVENT_START:
+        if (
+            pygame.time.get_ticks() - feather_last_trigger >= feather_cooldown
+            and not BIRD_DIE_EVENT
+        ):
+            u = 0
+            player_pos.y -= feather_bump * distance_scaler
+            FEATHER_EVENT_START = False
+
     if not start_event_triggered:
         if pygame.time.get_ticks() % (prestart_flip_time * 2) < prestart_flip_time:
             player_pos.y += (-prestart_speed) * distance_scaler * dt
         else:
             player_pos.y += (prestart_speed) * distance_scaler * dt
 
-    if (
-        animate_flap
-        and pygame.time.get_ticks() - last_flap_animation >= flap_animation_time
-    ):
+    if animate_flap and pygame.time.get_ticks() - last_flap_animation >= f_u:
         bird_state = (bird_state + 1) % 3
         last_flap_animation = pygame.time.get_ticks()
 
@@ -268,7 +435,7 @@ while running:
     ):
         bird_acc = a
 
-    # Spawn Rectangles
+    # Spawn Rectangles and powerups
     if (
         not BIRD_DIE_EVENT
         and game_start
@@ -288,11 +455,41 @@ while running:
         rectangle_queue.append((rect_id, rects))
         if rectangle_queue[0][1][0].x <= -100:
             rectangle_queue.popleft()
+        powerup_y = (gap_start + gap_start + (gap * distance_scaler)) / 2
+        spawn_random_powerup = random.randint(0, 7)
+        # 0, (1, 2, 3), 4, 5, 6, 7 (only spawns at 1, 2, 3)
+        if spawn_random_powerup in [1, 2, 3]:
+            powerups_spawned.append(
+                (spawn_random_powerup, pygame.Vector2(spawn_location_x, powerup_y))
+            )
+        if len(powerups_spawned) > 0 and powerups_spawned[0][1].x <= -100:
+            powerups_spawned.popleft()
 
     # Move Rectangles:
     for _, (top, bottom) in rectangle_queue:
         top.x -= (r_u * dt) * distance_scaler
         bottom.x -= (r_u * dt) * distance_scaler
+
+    for pipe, speed in pipes_to_fall:
+        speed += g * dt
+        for rect_id, rect in rectangle_queue:
+            if pipe[0] == rect_id:
+                rect[pipe[1]].y += (speed * dt) * distance_scaler
+
+    # Move powerups
+    for _, power_up in powerups_spawned:
+        power_up.x -= (r_u * dt) * distance_scaler
+
+    # Spawn bullets
+    if PEW_PEW_START_EVENT:
+        if fire_bullet:
+            bullet_queue.append(player_pos.copy())
+        # Move bullets:
+        for bullet in bullet_queue:
+            bullet.x += (bullet_speed * dt) * distance_scaler
+    else:
+        if len(bullet_queue) > 0:
+            bullet_queue.clear()
 
     # scroll background and ground
     background_pos.x -= (bg_u * dt) * distance_scaler
@@ -305,39 +502,60 @@ while running:
     # Render Game
     screen.fill(color="lightblue")
     draw_background()
-    pipes = draw_and_get_pipes()
+    bullets = draw_and_get_bullets()
+    pipe_ids, pipes = draw_and_get_pipes()
     grounds = draw_and_get_ground()
     bird = draw_and_get_bird()
+    powerup_ids, powerups = draw_and_get_powerups()
 
-    update_score()
+    if animate_flap:
+        update_score()
 
     # Handle Collisions
-    if game_start and len(bird.collidelistall(pipes)) >= 1:
-        r_u = 0
-        bird_acc = 0
-        u = max(u, 0)
-        animate_flap = False
-        g_u = 0
-        bg_u = 0
+    if collide:
+        if game_start and len(bird.collidelistall(pipes)) >= 1:
+            r_u = 0
+            bird_acc = 0
+            u = max(u, 0)
+            animate_flap = False
+            g_u = 0
+            bg_u = 0
 
-    if len(bird.collidelistall(grounds)) >= 1:
-        r_u = 0
-        BIRD_DIE_EVENT = True
-        animate_flap = False
-        g_u = 0
-        bg_u = 0
+        if len(bird.collidelistall(grounds)) >= 1:
+            r_u = 0
+            BIRD_DIE_EVENT = True
+            animate_flap = False
+            g_u = 0
+            bg_u = 0
+
+        for id, pipe in zip(pipe_ids, pipes):
+            collide_list = pipe.collidelistall(bullets)
+            if len(collide_list) >= 1:
+                pipes_to_fall.append((id, 0))
+
+        if game_start and len(bird.collidelistall(powerups)) >= 1:
+            if powerup_ids[0] == head_start_id:
+                head_starts_count += 1
+            elif powerup_ids[0] == pew_pew_id:
+                pew_pew_count += 1
+            elif powerup_ids[0] == feather_id:
+                feather_count += 1
+            powerups_spawned.popleft()
+
+    print(head_starts_count, pew_pew_count, feather_count)
 
     # Display Score
     if BIRD_DIE_EVENT:
+        HEAD_START_EVENT = False
+        PEW_PEW_START_EVENT = False
+        powerup_reset(modify_bird_pos=False)
         best_score = max(score, best_score)
         score_surface = score_font.render(f"{score}", True, "White")
         score_text_surface = score_font.render("SCORE", True, "orange1")
         best_score_surface = score_font.render(f"{best_score}", True, "White")
         best_score_text_surface = score_font.render("BEST", True, "orange1")
         space_to_restart = score_font.render("Restart??", True, "White")
-        retry_screen_rect = retry_screen_surf.get_rect(
-            center=(retry_screen_pos.x, retry_screen_pos.y)
-        )
+        retry_screen_rect = retry_screen_surf.get_rect(center=(retry_screen_pos))
         pygame.time.delay(150)
         pygame.draw.rect(screen, "palegoldenrod", retry_screen_rect, border_radius=10)
         pygame.draw.rect(screen, "black", retry_screen_rect, 5, 10)
