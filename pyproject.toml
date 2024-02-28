@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "flappybird"
+name = "flappybird++"
 version = "0.1.0"
 description = "A clone of flappy bird game built to learn python and pygame"
 authors = ["Kushal-Chandar <kushalchandariit@gmail.com>"]
@@ -7,8 +7,9 @@ license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.12,<3.13"
 pygame = "^2.5.2"
+pyinstaller = "^6.4.0"
 
 
 [build-system]
